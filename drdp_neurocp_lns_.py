@@ -9,6 +9,7 @@
 
 import os, sys, gzip, time, math, random, argparse
 import gc # explicit gc
+import csv # explicit import
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Iterable, Deque
 from collections import deque
@@ -970,7 +971,7 @@ class NeuroCPLNS:
 
 
     def solve(self, iters: int = 500, starts: int = 5, cp_time: float = 0.30, topk: int = 256, radius: int = 2,
-              cap: int = 1200, pr_every: int = 120, workers: int = 8):
+              cap: int = 1200, pr_every: int = 120, workers: int = 8, mode: str = 'full'):
         bestS = None;
         bestC = 10 ** 9
 
@@ -996,12 +997,23 @@ class NeuroCPLNS:
                 # ---- GPU choose unlock set
                 c0 = self.core.cost()
                 # _forward potentially returns numpy arrays if !use_torch
-                out = self._forward(stagn, detach=True)
-                if self.use_torch:
-                     s, v = out[2], out[3]
-                     scores = s.cpu().numpy()
+
+                # Experimental Mode: Random
+                if mode == 'random':
+                    # Use random scores instead of GNN
+                    scores = np.random.rand(self.n).astype(np.float32)
+                    v = torch.tensor(0.0) if self.use_torch else 0.0 # dummy value
+                    # Keep forward logic for compatibility if needed, but random implies we don't use it.
+                    # We might skip _forward entirely to save compute?
+                    # But keeping loops identical is safer.
+                    # Optimization: Skip forward pass if random.
                 else:
-                     scores, _ = out[2], out[3]
+                    out = self._forward(stagn, detach=True)
+                    if self.use_torch:
+                         s, v = out[2], out[3]
+                         scores = s.cpu().numpy()
+                    else:
+                         scores, _ = out[2], out[3]
 
                 # Focus on likely active nodes: 3/2 nodes and neighbors of violations
                 active = set([u for u in range(self.n) if self.core.S[u] > 0])
@@ -1037,7 +1049,14 @@ class NeuroCPLNS:
 
                 # ---- Exact local solve with CP-SAT (transactional)
                 snap = self.core.copy_snapshot()
-                S_loc, loc_cost, Rlist = solve_local_cpsat_region(self.core, R, time_limit=cp_time, workers=workers)
+
+                # Experimental Mode: Neural LNS without CP-SAT (Greedy fallback)
+                if mode == 'no_cpsat':
+                    # Use the greedy region solver already implemented
+                    S_loc, loc_cost, Rlist = solve_local_greedy_region(self.core, R)
+                else:
+                    S_loc, loc_cost, Rlist = solve_local_cpsat_region(self.core, R, time_limit=cp_time, workers=workers)
+
                 if S_loc is not None:
                     for i, vtx in enumerate(Rlist):
                         self.core._set_label(vtx, int(S_loc[i]))
@@ -1053,9 +1072,17 @@ class NeuroCPLNS:
                 # accounting & learning
                 c1 = self.core.cost()
                 reward = float(c0 - c1)
-                Xn = self.core.node_features()
-                gn = self.core.global_features(stagn)
-                self.replay.add(Event(unlocked=unlocked, reward=reward, stagn=stagn, X=X_taken, g=g_taken))
+
+                # If random mode, we likely didn't run forward pass, so X_taken/g_taken might be stale or unset.
+                # However, learning is turned off for random model usually.
+                # But let's act as if we collect data if mode='full' or 'no_cpsat'.
+                # For 'random', we can't learn anything useful for the network (policy gradient on random noise is noise).
+                # For 'no_learning', we definitely don't learn.
+
+                if mode not in ('random', 'no_learning'):
+                    Xn = self.core.node_features()
+                    gn = self.core.global_features(stagn)
+                    self.replay.add(Event(unlocked=unlocked, reward=reward, stagn=stagn, X=X_taken, g=g_taken))
 
                 if reward > 0 and self.core.viol_count == 0:
                     stagn = 0
@@ -1082,16 +1109,34 @@ class NeuroCPLNS:
                     bestS = self.core.S.copy()
 
                 # Learn every 16 iters
-                if it % 16 == 0: self._learn(batch=256)
+                if mode not in ('random', 'no_learning') and (it % 16 == 0):
+                    self._learn(batch=256)
                 if stagn >= 4: break
 
         return bestS, bestC
 
 def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
               cp_time: float = 0.30, topk: int = 256, device: str = None,
-              workers: int = 1):
+              workers: int = 1, mode: str = 'full'):
+    # CSV logging setup
+    csv_file = None
+    writer = None
+    # If out_path is "results.txt", csv will be "results.txt.csv"
+    # If out_path is "results.csv", reuse it.
+    csv_path = out_path if out_path.endswith('.csv') else out_path + ".csv"
+
+    try:
+        csv_file = open(csv_path, 'w', newline='', encoding='utf-8')
+        writer = csv.writer(csv_file)
+        writer.writerow(['Graph', 'Method', 'Cost', 'Time', 'Iterations'])
+        print(f"[INFO] CSV logging enabled: {csv_path}")
+    except Exception as e:
+        print(f"[WARN] Could not open CSV file {csv_path}: {e}", file=sys.stderr)
+
     files = sorted([os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith(".mtx.gz")])
     t0 = time.time()
+
+    # Text output file
     with open(out_path, "w", encoding="utf-8") as f:
         for fp in files:
             base = os.path.basename(fp)
@@ -1107,7 +1152,8 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
 
                 t1 = time.time()
                 S, c = solver.solve(
-                    iters=iters, starts=starts, cp_time=cp_time, topk=topk, workers=workers
+                    iters=iters, starts=starts, cp_time=cp_time, topk=topk,
+                    workers=workers, mode=mode
                 )
                 secs = time.time() - t1
 
@@ -1134,8 +1180,68 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
                 # file
                 f.write(block + "\n")  # blank line between instances
 
+                # CSV
+                if writer:
+                    writer.writerow([base, mode, int(cost_out), f"{secs:.4f}", iters])
+                    csv_file.flush() # ensure data is written
+
             except Exception as e:
-                # Emit the same 4-line shape even on error
+                # Handle OOM by retrying on CPU if applicable
+                is_oom = "out of memory" in str(e).lower()
+                # Check device carefully
+                is_gpu = False
+                if device is not None and ('cuda' in str(device).lower() or 'gpu' in str(device).lower()):
+                    is_gpu = True
+
+                if is_oom and (is_gpu or device is None):
+                    print(f"[WARN] {base}: GPU OOM. Retrying on CPU...", file=sys.stderr)
+                    # Clear GPU cache
+                    if TORCH_OK:
+                        torch.cuda.empty_cache()
+
+                    # Delete old solver explicitly
+                    if 'solver' in locals():
+                        del solver
+                    gc.collect()
+
+                    try:
+                        solver = NeuroCPLNS(n, neigh, device='cpu')
+                        t1 = time.time()
+                        # Reduce topk slightly on CPU to save time? Or keep same? keep same for now.
+                        S, c = solver.solve(
+                            iters=max(10, iters // 5), # Reduce iters on CPU because it's slow
+                            starts=max(1, starts // 2),
+                            cp_time=cp_time,
+                            topk=topk,
+                            workers=workers,
+                            mode=mode
+                        )
+                        secs = time.time() - t1
+                        try:
+                             sol_text = str(S.tolist())
+                        except:
+                             sol_text = str(list(S))
+
+                        ok, _, _ = verify_feasible(S, neigh)
+                        cost_out = c if ok else -1
+                        block = (
+                            f"Graph: {base}\n"
+                            f"Solution: {sol_text}\n"
+                            f"Cost: {int(cost_out)}\n"
+                            f"Time(s): {secs:.6f}\n"
+                        )
+                        print(block, end="")
+                        f.write(block + "\n")
+                        # CSV for retry
+                        if writer:
+                            writer.writerow([base, mode + "_cpu_fallback", int(cost_out), f"{secs:.4f}", max(10, iters // 5)])
+                            csv_file.flush()
+
+                        continue # Success on retry
+                    except Exception as e2:
+                        print(f"[ERROR] {base} (CPU retry): {e2}", file=sys.stderr)
+
+                # Emit the same 4-line shape on failure
                 block = (
                     f"Graph: {base}\n"
                     f"Solution: []\n"
@@ -1146,9 +1252,16 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
                 f.write(block + "\n")
                 # error details to stderr so they don't pollute the strict format
                 print(f"[ERROR] {base}: {e}", file=sys.stderr)
+                # CSV fail
+                if writer:
+                    writer.writerow([base, mode, -1, 0.0, iters])
+                    csv_file.flush()
 
     # keep overall timing off the main output format
     print(f"[INFO] Total time: {time.time() - t0:.2f}s", file=sys.stderr)
+    if csv_file:
+        csv_file.close()
+        print(f"[INFO] Saved CSV results to {csv_file.name}", file=sys.stderr)
 
 # ----- tiny verifier (debug aid) -----
 def verify_feasible(S: np.ndarray, neigh: List[List[int]]) -> Tuple[bool, int, List[int]]:
@@ -1180,6 +1293,9 @@ def main():
     ap_s.add_argument("--device", type=str, default=None)
     ap_s.add_argument("--workers", type=int, default=1,  # <<< CP-SAT threads
                       help="OR-Tools CP-SAT worker threads (1 = single CPU)")
+    ap_s.add_argument("--mode", type=str, default='full',
+                      choices=['full', 'random', 'no_learning', 'no_cpsat'],
+                      help="Ablation mode: full, random, no_learning, no_cpsat")
 
     args = ap.parse_args()
     if args.cmd == "solve":
@@ -1192,11 +1308,12 @@ def main():
             topk=args.topk,
             device=args.device,
             workers=args.workers,  # <<< pass through
+            mode=args.mode
         )
     else:
         print(
             "Usage:\n  python drdp_neurocp_lns.py solve --data_dir DIR --out OUT.txt "
-            "[--iters 500] [--starts 5] [--cp_time 0.30] [--topk 256] [--device cuda] [--workers 1]"
+            "[--iters 500] [--starts 5] [--cp_time 0.30] [--topk 256] [--device cuda] [--workers 1] [--mode full]"
         )
 
 
