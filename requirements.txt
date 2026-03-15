@@ -1,7 +1,21 @@
-torch>=2.2
-numpy>=2.0
-scipy>=1.10
-pandas>=2.0
-networkx>=3.0
-tqdm>=4.65
-ortools>=9.15
+# Core Python
+python>=3.10
+
+# Numerical & Data
+numpy>=1.25
+pandas>=2.1
+scipy>=1.11
+
+# Plotting & Visualization
+matplotlib>=3.8
+seaborn>=0.12
+
+# Solver / Optimization / LNS
+ortools>=9.6
+# Add any other CP-SAT or LNS-specific dependencies your drdp_neurocp_lns_ uses
+# e.g., if using torch or cupy for GPU acceleration
+torch>=2.2; platform_system=="Linux" or platform_system=="Windows"
+# If CUDA, match your GPU version
+
+# Misc / Colab utils
+tqdm>=4.66
