@@ -8,6 +8,7 @@
 # ---------------------------------------------------------------------
 
 import os, sys, gzip, time, math, random, argparse
+import gc # explicit gc
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Iterable, Deque
 from collections import deque
@@ -366,17 +367,19 @@ if TORCH_OK:
             row, col = adj_indices
 
             # Wh[row]: (E, heads, d_k), Wh[col]: (E, heads, d_k)
-            # Concatenate features of source and target
-            # e_ij = a^T [Wh_i || Wh_j]
-            Wh_row = Wh[row]
-            Wh_col = Wh[col]
+            # Additive Attention: a_l * Wh_i + a_r * Wh_j
+            # self.a is (heads, 2*d_k). Split into a_l: (heads, d_k), a_r: (heads, d_k)
+            a_l = self.a[:, :self.d_k] # (heads, d_k)
+            a_r = self.a[:, self.d_k:] # (heads, d_k)
 
-            # Simple manual attention mechanism via scatter info
-            # a_input: (E, heads, 2*d_k)
-            a_input = torch.cat([Wh_row, Wh_col], dim=-1)
+            # Precompute node scores: (N, heads)
+            # Wh: (N, heads, d_k)  * a_l: (heads, d_k) -> (N, heads)?
+            # einsum 'nhd,hd->nh'
+            score_l = (Wh * a_l.unsqueeze(0)).sum(dim=-1)
+            score_r = (Wh * a_r.unsqueeze(0)).sum(dim=-1)
 
-            # e: (E, heads, 1) -> (E, heads)
-            e = self.leak((a_input * self.a).sum(dim=-1))
+            # Edge scores: score_l[row] + score_r[col] => (E, heads)
+            e = self.leak(score_l[row] + score_r[col])
 
             # Softmax over neighbors (for each dst 'col', sum over 'row')
             # Use geometric / scatter softmax (torch_scatter logic simulation)
@@ -397,7 +400,18 @@ if TORCH_OK:
             alpha = e_exp / denom[col]
 
             # Msg: alpha * Wh_row
-            msg = alpha.unsqueeze(-1) * Wh_row # (E, heads, d_k)
+            # Here Wh_row is (E, heads, d_k). Is it possible to avoid materializing it?
+            # Ideally: we want to compute sum_{j in N(i)} alpha_{ji} W h_j
+            # alpha is (E, heads). Wh[row] is (E, heads, d_k).
+            # This multiplication materializes (E, heads, d_k) which is big.
+            # But we can't easily avoid it without custom kernel or torch_scatter/PyG.
+            # For now, we optimized the 'e' computation which was (E, heads, 2*d_k) -> (E, heads).
+            # The msg tensor is (E, heads, d_k). Max memory usage is dominated by this.
+            # If d_k=32, E=10M => 10M * 4 * 32 * 4 bytes = 5GB.
+            # 'blckhole' might be large.
+            # Let's hope reducing 'e' calc is enough. If not, we need checkpointing or CPU fallback.
+
+            msg = alpha.unsqueeze(-1) * Wh[row] # (E, heads, d_k)
 
             # Agg: sum msg per destination
             out = torch.zeros(N, self.n_heads, self.d_k, device=h.device)
@@ -1081,6 +1095,12 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
     with open(out_path, "w", encoding="utf-8") as f:
         for fp in files:
             base = os.path.basename(fp)
+
+            # Explicit cleanup
+            if TORCH_OK:
+                torch.cuda.empty_cache()
+            gc.collect()
+
             try:
                 n, neigh = read_mtx_gz(fp)
                 solver = NeuroCPLNS(n, neigh, device=device)
