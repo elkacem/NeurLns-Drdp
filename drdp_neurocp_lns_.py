@@ -875,12 +875,20 @@ class NeuroCPLNS:
             # old amp.autocast only supported cuda implicitly
             ctx = amp.autocast(enabled=self.fp16)
 
-        with ctx:
-            H = self.enc(X, self.A)
-            s, v = self.heads(H, g)
+        # Optimize memory during inference steps (solve loop)
+        # by disabling gradient tracking entirely
         if detach:
-            return H.detach(), g.detach(), s.detach(), v.detach()
+            with torch.no_grad():
+                with ctx:
+                    H = self.enc(X, self.A)
+                    s, v = self.heads(H, g)
+                return H, g, s, v  # already detached by no_grad
+
+        # During training steps (learning loop), we need gradients
         else:
+            with ctx:
+                H = self.enc(X, self.A)
+                s, v = self.heads(H, g)
             return H, g, s, v
 
     def _learn(self, batch=256, value_coef: float = 0.5):
@@ -1064,41 +1072,6 @@ class NeuroCPLNS:
                 if stagn >= 4: break
 
         return bestS, bestC
-
-
-# def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
-#               cp_time: float = 0.30, topk: int = 256, device: str = None,
-#               workers: int = 1):  # <<< add arg
-#     files = sorted([os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith(".mtx.gz")])
-#     t0 = time.time()
-#     with open(out_path, "w") as f:
-#         f.write("=== DRDP-NeuroCP-LNS ===\n")
-#         f.write(f"Starts={starts} Iters={iters} | cp_time={cp_time}s | TopK={topk} | workers={workers}\n\n")
-#         for fp in files:
-#             print(f"Solving: {fp}")
-#             try:
-#                 n, neigh = read_mtx_gz(fp)
-#                 solver = NeuroCPLNS(n, neigh, device=device)
-#                 t1 = time.time()
-#                 S, c = solver.solve(
-#                     iters=iters, starts=starts, cp_time=cp_time, topk=topk,
-#                     workers=workers  # <<< pass through
-#                 )
-#                 secs = time.time() - t1
-#                 assert S is not None
-#                 ok, nviol, _ = verify_feasible(S, neigh)
-#                 if not ok:
-#                     print(f"  WARNING: solution not feasible, violations={nviol}; discarding.")
-#                     c = -1
-#                 print(f"  best cost={c}  time={secs:.3f}s")
-#                 f.write(f"{os.path.basename(fp):30s}  best_cost={c:6d}  time={secs:7.3f}s\n")
-#             except Exception as e:
-#                 print("  ERROR:", e)
-#                 print(traceback.format_exc())
-#                 f.write(f"{os.path.basename(fp):30s}  ERROR {e}\n")
-#
-#         f.write(f"\nTotal time: {time.time() - t0:.2f}s\n")
-#     print(f"Saved results to {out_path}")
 
 def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
               cp_time: float = 0.30, topk: int = 256, device: str = None,

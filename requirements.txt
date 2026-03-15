@@ -1,0 +1,7 @@
+torch>=2.2
+numpy>=2.0
+scipy>=1.10
+pandas>=2.0
+networkx>=3.0
+tqdm>=4.65
+ortools>=9.15
