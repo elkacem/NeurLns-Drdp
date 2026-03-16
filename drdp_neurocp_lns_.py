@@ -1194,7 +1194,7 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
                     is_gpu = True
 
                 if is_oom and (is_gpu or device is None):
-                    print(f"[WARN] {base}: GPU OOM. Retrying on CPU...", file=sys.stderr)
+                    print(f"[WARN] {base}: GPU OOM. Skipping CPU retry...", file=sys.stderr)
                     # Clear GPU cache
                     if TORCH_OK:
                         torch.cuda.empty_cache()
@@ -1204,42 +1204,6 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
                         del solver
                     gc.collect()
 
-                    try:
-                        solver = NeuroCPLNS(n, neigh, device='cpu')
-                        t1 = time.time()
-                        # Reduce topk slightly on CPU to save time? Or keep same? keep same for now.
-                        S, c = solver.solve(
-                            iters=max(10, iters // 5), # Reduce iters on CPU because it's slow
-                            starts=max(1, starts // 2),
-                            cp_time=cp_time,
-                            topk=topk,
-                            workers=workers,
-                            mode=mode
-                        )
-                        secs = time.time() - t1
-                        try:
-                             sol_text = str(S.tolist())
-                        except:
-                             sol_text = str(list(S))
-
-                        ok, _, _ = verify_feasible(S, neigh)
-                        cost_out = c if ok else -1
-                        block = (
-                            f"Graph: {base}\n"
-                            f"Solution: {sol_text}\n"
-                            f"Cost: {int(cost_out)}\n"
-                            f"Time(s): {secs:.6f}\n"
-                        )
-                        print(block, end="")
-                        f.write(block + "\n")
-                        # CSV for retry
-                        if writer:
-                            writer.writerow([base, mode + "_cpu_fallback", int(cost_out), f"{secs:.4f}", max(10, iters // 5)])
-                            csv_file.flush()
-
-                        continue # Success on retry
-                    except Exception as e2:
-                        print(f"[ERROR] {base} (CPU retry): {e2}", file=sys.stderr)
 
                 # Emit the same 4-line shape on failure
                 block = (
