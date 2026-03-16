@@ -1,0 +1,23 @@
+The following 22 graphs were excluded because NeuroCP-LNS (Ours) did not produce a feasible solution (likely due to OOM or timeout):
+add20.mtx.gz
+blckhole.mtx.gz
+bp_____0.mtx.gz
+eris1176.mtx.gz
+fidap001.mtx.gz
+fidap002.mtx.gz
+fidap004.mtx.gz
+nos2.mtx.gz
+nos4.mtx.gz
+pores_1.mtx.gz
+rgg010.mtx.gz
+saylr1.mtx.gz
+saylr3.mtx.gz
+shl__200.mtx.gz
+shl__400.mtx.gz
+shl____0.mtx.gz
+sstmodel.mtx.gz
+steam1.mtx.gz
+str__200.mtx.gz
+will199.mtx.gz
+will57.mtx.gz
+young1c.mtx.gz

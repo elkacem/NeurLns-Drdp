@@ -27,16 +27,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Analyze DRDP Solver Results for Research Paper")
 
     # Auto-detection defaults
-    default_full = "results_full.txt.csv"
-    default_random = "results_random.txt.csv"
-    default_nolearn = "results_nolearn.txt.csv"
-    default_nocpsat = "results_nocpsat.txt.csv"
+    default_results = "results.txt.csv"
 
-    parser.add_argument("--full", type=str, help="Path to 'full' mode results", default=default_full)
-    parser.add_argument("--random", type=str, help="Path to 'random' mode results", default=default_random)
-    parser.add_argument("--no_learning", type=str, help="Path to 'no_learning' mode results", default=default_nolearn)
-    parser.add_argument("--no_cpsat", type=str, help="Path to 'no_cpsat' mode results", default=default_nocpsat)
-    parser.add_argument("--classical", type=str, help="Path to classical results", default=None)
+    parser.add_argument("--results", type=str, help="Path to main solver results", default=default_results)
+    parser.add_argument("--classical", type=str, help="Path to classical results (for comparison)", default=None)
 
     parser.add_argument("--out_dir", type=str, default="analysis_output", help="Directory for paper artifacts")
     return parser.parse_args()
@@ -45,10 +39,7 @@ def load_and_clean_data(args):
     """Loads CSVs, normalizes headers, handles infeasible (-1) entries."""
     # Define method names for paper
     file_map = {
-        'NeuroCP-LNS (Ours)': args.full,
-        'Random-LNS': args.random,
-        'No-Learning': args.no_learning,
-        'No-CPSat': args.no_cpsat,
+        'NeuroCP-LNS': args.results,
     }
 
     if args.classical:
@@ -61,6 +52,11 @@ def load_and_clean_data(args):
     valid_methods = []
 
     for method, path in file_map.items():
+        # Exclusion logic
+        if args.exclude and any(exc.lower() in method.lower() for exc in args.exclude):
+            print(f"{method:<25} | {'-- excluded --':<40} | SKIPPED (User request)")
+            continue
+
         if path and os.path.exists(path):
             try:
                 df = pd.read_csv(path)
@@ -192,12 +188,45 @@ def run_analysis(df, out_dir):
     print("\n=== Aggregated Results ===")
     print(summary[['Method', 'Mean Cost', 'Mean Time', 'Mean Gap %', 'Success Rate %']].to_string(index=False))
 
+    # --- A.2 Head-to-Head Win/Tie/Loss (vs Ours) ---
+    baseline = 'NeuroCP-LNS (Ours)'
+    if baseline in df['Method'].unique():
+        pivot_cost = df.pivot_table(index='Graph', columns='Method', values='Cost')
+        if len(pivot_cost.columns) > 1:
+            print(f"\n=== Head-to-Head vs {baseline} ===")
+            h2h_data = []
+            for method in pivot_cost.columns:
+                if method == baseline: continue
+
+                # Compare method vs baseline (lower cost is better)
+                # Diff = Method - Baseline
+                # Diff > 0 => Baseline wins (Method is worse)
+                # Diff < 0 => Method wins (Baseline is worse)
+                diffs = pivot_cost[method] - pivot_cost[baseline]
+
+                wins = (diffs < 0).sum() # Method beats Baseline
+                losses = (diffs > 0).sum() # Baseline beats Method
+                ties = (diffs == 0).sum()
+
+                print(f"{baseline} vs {method:<20} | Wins: {losses} | Ties: {ties} | Losses: {wins}")
+                h2h_data.append({
+                    'Opponent': method,
+                    'Ours_Wins': losses,
+                    'Ties': ties,
+                    'Ours_Losses': wins
+                })
+
+            if h2h_data:
+                pd.DataFrame(h2h_data).to_csv(os.path.join(out_dir, "head_to_head.csv"), index=False)
+        else:
+            print(f"\n[INFO] Skipping Head-to-Head (Only 1 method present)")
+
     # --- B. Statistical Tests (Wilcoxon) ---
     pivot_gap = df.pivot_table(index='Graph', columns='Method', values='Gap')
     baseline = 'NeuroCP-LNS (Ours)'
 
     stats_log = []
-    if baseline in pivot_gap.columns:
+    if baseline in pivot_gap.columns and len(pivot_gap.columns) > 1:
         print(f"\n=== Statistical Significance (vs {baseline}) ===")
         for method in pivot_gap.columns:
             if method == baseline: continue
@@ -258,7 +287,10 @@ def create_plots(df, summary_df, out_dir):
     plt.grid(axis='y', linestyle='--', alpha=0.5)
     plt.xticks(rotation=15)
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "fig_barplot_success.pdf"))
+    try:
+        plt.savefig(os.path.join(out_dir, "fig_barplot_success.pdf"))
+    except PermissionError:
+        print(f"[WARN] Could not save 'fig_barplot_success.pdf' (Permission denied). Is it open?")
     plt.close()
 
     # 3. Runtime vs Quality Tradeoff (Scatter)
@@ -276,7 +308,10 @@ def create_plots(df, summary_df, out_dir):
     plt.ylabel("Average Optimality Gap (%)")
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "fig_scatter_tradeoff.pdf"))
+    try:
+        plt.savefig(os.path.join(out_dir, "fig_scatter_tradeoff.pdf"))
+    except PermissionError:
+        print(f"[WARN] Could not save 'fig_scatter_tradeoff.pdf' (Permission denied). Is it open?")
     plt.close()
 
     print("\n[INFO] Plots saved to", out_dir)
@@ -304,8 +339,14 @@ def main():
 
             if unsolved_graphs:
                 print(f"\n[FILTERING] Excluding {len(unsolved_graphs)} graphs not solved by {our_method} (Resource/Time limits):")
-                for g in sorted(unsolved_graphs):
-                    print(f"  - {g}")
+
+                with open(os.path.join(args.out_dir, "excluded_graphs.txt"), "w") as f:
+                    f.write(f"The following {len(unsolved_graphs)} graphs were excluded because {our_method} did not produce a feasible solution (likely due to OOM or timeout):\n")
+                    for g in sorted(unsolved_graphs):
+                        print(f"  - {g}")
+                        f.write(f"{g}\n")
+
+                print(f"[INFO] List of excluded graphs saved to '{os.path.join(args.out_dir, 'excluded_graphs.txt')}'")
 
                 # Keep only intersections
                 df = df[df['Graph'].isin(solved_graphs)]

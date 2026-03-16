@@ -1,0 +1,4 @@
+Comparison,p-value,Significant
+No-CPSat,5.204421162102851e-13,True
+No-Learning,0.9143643733814628,False
+Random-LNS,0.5093473166684719,False

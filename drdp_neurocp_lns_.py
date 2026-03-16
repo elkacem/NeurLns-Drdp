@@ -971,7 +971,7 @@ class NeuroCPLNS:
 
 
     def solve(self, iters: int = 500, starts: int = 5, cp_time: float = 0.30, topk: int = 256, radius: int = 2,
-              cap: int = 1200, pr_every: int = 120, workers: int = 8, mode: str = 'full'):
+              cap: int = 1200, pr_every: int = 120, workers: int = 8):
         bestS = None;
         bestC = 10 ** 9
 
@@ -996,24 +996,13 @@ class NeuroCPLNS:
             for it in range(1, iters + 1):
                 # ---- GPU choose unlock set
                 c0 = self.core.cost()
-                # _forward potentially returns numpy arrays if !use_torch
 
-                # Experimental Mode: Random
-                if mode == 'random':
-                    # Use random scores instead of GNN
-                    scores = np.random.rand(self.n).astype(np.float32)
-                    v = torch.tensor(0.0) if self.use_torch else 0.0 # dummy value
-                    # Keep forward logic for compatibility if needed, but random implies we don't use it.
-                    # We might skip _forward entirely to save compute?
-                    # But keeping loops identical is safer.
-                    # Optimization: Skip forward pass if random.
+                out = self._forward(stagn, detach=True)
+                if self.use_torch:
+                        s, v = out[2], out[3]
+                        scores = s.cpu().numpy()
                 else:
-                    out = self._forward(stagn, detach=True)
-                    if self.use_torch:
-                         s, v = out[2], out[3]
-                         scores = s.cpu().numpy()
-                    else:
-                         scores, _ = out[2], out[3]
+                        scores, _ = out[2], out[3]
 
                 # Focus on likely active nodes: 3/2 nodes and neighbors of violations
                 active = set([u for u in range(self.n) if self.core.S[u] > 0])
@@ -1050,12 +1039,7 @@ class NeuroCPLNS:
                 # ---- Exact local solve with CP-SAT (transactional)
                 snap = self.core.copy_snapshot()
 
-                # Experimental Mode: Neural LNS without CP-SAT (Greedy fallback)
-                if mode == 'no_cpsat':
-                    # Use the greedy region solver already implemented
-                    S_loc, loc_cost, Rlist = solve_local_greedy_region(self.core, R)
-                else:
-                    S_loc, loc_cost, Rlist = solve_local_cpsat_region(self.core, R, time_limit=cp_time, workers=workers)
+                S_loc, loc_cost, Rlist = solve_local_cpsat_region(self.core, R, time_limit=cp_time, workers=workers)
 
                 if S_loc is not None:
                     for i, vtx in enumerate(Rlist):
@@ -1073,16 +1057,9 @@ class NeuroCPLNS:
                 c1 = self.core.cost()
                 reward = float(c0 - c1)
 
-                # If random mode, we likely didn't run forward pass, so X_taken/g_taken might be stale or unset.
-                # However, learning is turned off for random model usually.
-                # But let's act as if we collect data if mode='full' or 'no_cpsat'.
-                # For 'random', we can't learn anything useful for the network (policy gradient on random noise is noise).
-                # For 'no_learning', we definitely don't learn.
-
-                if mode not in ('random', 'no_learning'):
-                    Xn = self.core.node_features()
-                    gn = self.core.global_features(stagn)
-                    self.replay.add(Event(unlocked=unlocked, reward=reward, stagn=stagn, X=X_taken, g=g_taken))
+                Xn = self.core.node_features()
+                gn = self.core.global_features(stagn)
+                self.replay.add(Event(unlocked=unlocked, reward=reward, stagn=stagn, X=X_taken, g=g_taken))
 
                 if reward > 0 and self.core.viol_count == 0:
                     stagn = 0
@@ -1109,7 +1086,7 @@ class NeuroCPLNS:
                     bestS = self.core.S.copy()
 
                 # Learn every 16 iters
-                if mode not in ('random', 'no_learning') and (it % 16 == 0):
+                if it % 16 == 0:
                     self._learn(batch=256)
                 if stagn >= 4: break
 
@@ -1117,7 +1094,7 @@ class NeuroCPLNS:
 
 def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
               cp_time: float = 0.30, topk: int = 256, device: str = None,
-              workers: int = 1, mode: str = 'full'):
+              workers: int = 1):
     # CSV logging setup
     csv_file = None
     writer = None
@@ -1153,7 +1130,7 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
                 t1 = time.time()
                 S, c = solver.solve(
                     iters=iters, starts=starts, cp_time=cp_time, topk=topk,
-                    workers=workers, mode=mode
+                    workers=workers
                 )
                 secs = time.time() - t1
 
@@ -1180,9 +1157,9 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
                 # file
                 f.write(block + "\n")  # blank line between instances
 
-                # CSV
+                # CSV - Hardcoded Method "NeuroCP-LNS"
                 if writer:
-                    writer.writerow([base, mode, int(cost_out), f"{secs:.4f}", iters])
+                    writer.writerow([base, "NeuroCP-LNS", int(cost_out), f"{secs:.4f}", iters])
                     csv_file.flush() # ensure data is written
 
             except Exception as e:
@@ -1204,7 +1181,6 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
                         del solver
                     gc.collect()
 
-
                 # Emit the same 4-line shape on failure
                 block = (
                     f"Graph: {base}\n"
@@ -1218,7 +1194,7 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
                 print(f"[ERROR] {base}: {e}", file=sys.stderr)
                 # CSV fail
                 if writer:
-                    writer.writerow([base, mode, -1, 0.0, iters])
+                    writer.writerow([base, "NeuroCP-LNS", -1, 0.0, iters])
                     csv_file.flush()
 
     # keep overall timing off the main output format
@@ -1257,9 +1233,6 @@ def main():
     ap_s.add_argument("--device", type=str, default=None)
     ap_s.add_argument("--workers", type=int, default=1,  # <<< CP-SAT threads
                       help="OR-Tools CP-SAT worker threads (1 = single CPU)")
-    ap_s.add_argument("--mode", type=str, default='full',
-                      choices=['full', 'random', 'no_learning', 'no_cpsat'],
-                      help="Ablation mode: full, random, no_learning, no_cpsat")
 
     args = ap.parse_args()
     if args.cmd == "solve":
@@ -1272,12 +1245,11 @@ def main():
             topk=args.topk,
             device=args.device,
             workers=args.workers,  # <<< pass through
-            mode=args.mode
         )
     else:
         print(
             "Usage:\n  python drdp_neurocp_lns.py solve --data_dir DIR --out OUT.txt "
-            "[--iters 500] [--starts 5] [--cp_time 0.30] [--topk 256] [--device cuda] [--workers 1] [--mode full]"
+            "[--iters 500] [--starts 5] [--cp_time 0.30] [--topk 256] [--device cuda] [--workers 1]"
         )
 
 

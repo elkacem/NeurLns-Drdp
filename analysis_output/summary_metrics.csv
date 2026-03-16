@@ -1,0 +1,5 @@
+Method,Mean Cost,Median_Cost,Std Cost,Mean Time,Mean Gap %,Success Rate %,Feasible_Count,Total_Instances
+NeuroCP-LNS (Ours),198.15,84.00,263.79,11.91,0.31,72.63,95,95
+No-CPSat,210.46,84.00,279.80,1.91,7.03,27.37,95,95
+No-Learning,198.19,84.00,264.35,7.53,0.33,74.74,95,95
+Random-LNS,198.08,84.00,263.74,3.43,0.38,67.37,95,95
