@@ -1123,79 +1123,96 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
                 torch.cuda.empty_cache()
             gc.collect()
 
+            solver = None
             try:
+                # Try handling with requested device (e.g. CUDA)
                 n, neigh = read_mtx_gz(fp)
                 solver = NeuroCPLNS(n, neigh, device=device)
 
                 t1 = time.time()
                 S, c = solver.solve(
                     iters=iters, starts=starts, cp_time=cp_time, topk=topk,
-                    workers=workers
+                    workers=workers, radius=2, cap=1200, pr_every=120
                 )
                 secs = time.time() - t1
 
-                # Ensure we have a Python-list-looking solution
-                try:
-                    sol_text = str(S.tolist())
-                except Exception:
-                    sol_text = str(list(S))  # fallback
-
-                # Optional: verify feasibility; if infeasible, keep the block shape and mark cost -1
-                ok, _, _ = verify_feasible(S, neigh)
-                cost_out = c if ok else -1
-
-                block = (
-                    f"Graph: {base}\n"
-                    f"Solution: {sol_text}\n"
-                    f"Cost: {int(cost_out)}\n"
-                    f"Time(s): {secs:.6f}\n"
-                )
-
-                # stdout
-                print(block, end="")
-
-                # file
-                f.write(block + "\n")  # blank line between instances
-
-                # CSV - Hardcoded Method "NeuroCP-LNS"
-                if writer:
-                    writer.writerow([base, "NeuroCP-LNS", int(cost_out), f"{secs:.4f}", iters])
-                    csv_file.flush() # ensure data is written
-
             except Exception as e:
-                # Handle OOM by retrying on CPU if applicable
-                is_oom = "out of memory" in str(e).lower()
-                # Check device carefully
-                is_gpu = False
-                if device is not None and ('cuda' in str(device).lower() or 'gpu' in str(device).lower()):
-                    is_gpu = True
-
-                if is_oom and (is_gpu or device is None):
-                    print(f"[WARN] {base}: GPU OOM. Skipping CPU retry...", file=sys.stderr)
-                    # Clear GPU cache
+                # Catch OOM specifically
+                if "out of memory" in str(e).lower() and device and "cuda" in str(device).lower():
+                    print(f"[WARN] {base}: GPU OOM. Retrying on CPU...", file=sys.stderr)
                     if TORCH_OK:
                         torch.cuda.empty_cache()
-
-                    # Delete old solver explicitly
-                    if 'solver' in locals():
+                    if solver:
                         del solver
-                    gc.collect()
+                        gc.collect()
 
-                # Emit the same 4-line shape on failure
-                block = (
-                    f"Graph: {base}\n"
-                    f"Solution: []\n"
-                    f"Cost: -1\n"
-                    f"Time(s): 0.000000\n"
-                )
-                print(block, end="")
-                f.write(block + "\n")
-                # error details to stderr so they don't pollute the strict format
-                print(f"[ERROR] {base}: {e}", file=sys.stderr)
-                # CSV fail
-                if writer:
-                    writer.writerow([base, "NeuroCP-LNS", -1, 0.0, iters])
-                    csv_file.flush()
+                    # Retry on CPU
+                    try:
+                        solver = NeuroCPLNS(n, neigh, device='cpu')
+                        t1 = time.time()
+                        S, c = solver.solve(
+                            iters=iters, starts=starts, cp_time=cp_time, topk=topk,
+                            workers=workers, radius=2, cap=1200, pr_every=120
+                        )
+                        secs = time.time() - t1
+                    except Exception as e2:
+                        # CPU failed too (or some other error)
+                        block = (
+                            f"Graph: {base}\n"
+                            f"Solution: []\n"
+                            f"Cost: -1\n"
+                            f"Time(s): 0.000000\n"
+                        )
+                        print(block, end="")
+                        f.write(block + "\n")
+                        print(f"[ERROR] {base} (CPU Retry Failed): {e2}", file=sys.stderr)
+                        if writer:
+                            writer.writerow([base, "NeuroCP-LNS", -1, 0.0, iters])
+                            csv_file.flush()
+                        continue
+                else:
+                    # Not an OOM or already on CPU
+                    block = (
+                        f"Graph: {base}\n"
+                        f"Solution: []\n"
+                        f"Cost: -1\n"
+                        f"Time(s): 0.000000\n"
+                    )
+                    print(block, end="")
+                    f.write(block + "\n")
+                    print(f"[ERROR] {base}: {e}", file=sys.stderr)
+                    if writer:
+                        writer.writerow([base, "NeuroCP-LNS", -1, 0.0, iters])
+                        csv_file.flush()
+                    continue
+
+            # If success (either first try or retry)
+            try:
+                sol_text = str(S.tolist())
+            except Exception:
+                sol_text = str(list(S))
+
+            ok, _, _ = verify_feasible(S, neigh)
+            cost_out = c if ok else -1
+
+            block = (
+                f"Graph: {base}\n"
+                f"Solution: {sol_text}\n"
+                f"Cost: {int(cost_out)}\n"
+                f"Time(s): {secs:.6f}\n"
+            )
+
+            # stdout
+            print(block, end="")
+
+            # file
+            f.write(block + "\n")
+
+            # CSV
+            if writer:
+                writer.writerow([base, "NeuroCP-LNS", int(cost_out), f"{secs:.4f}", iters])
+                csv_file.flush()
+
 
     # keep overall timing off the main output format
     print(f"[INFO] Total time: {time.time() - t0:.2f}s", file=sys.stderr)

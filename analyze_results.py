@@ -52,10 +52,10 @@ def load_and_clean_data(args):
     valid_methods = []
 
     for method, path in file_map.items():
-        # Exclusion logic
-        if args.exclude and any(exc.lower() in method.lower() for exc in args.exclude):
-            print(f"{method:<25} | {'-- excluded --':<40} | SKIPPED (User request)")
-            continue
+        # Exclusion logic removed as args.exclude is no longer supported
+        # if args.exclude and any(exc.lower() in method.lower() for exc in args.exclude):
+        #     print(f"{method:<25} | {'-- excluded --':<40} | SKIPPED (User request)")
+        #     continue
 
         if path and os.path.exists(path):
             try:
@@ -106,6 +106,54 @@ def compute_comparative_metrics(df):
 
     print(f"\n[INFO] Processed {df['Graph'].nunique()} unique instances.")
     return df
+
+def conduct_friedman_test(df, out_dir):
+    """
+    Conducts Friedman Rank Sum Test and outputs Average Ranks.
+    Friedman test checks if there are statistically significant differences between methods.
+    """
+    # Pivot table: Graph x Method -> Cost
+    pivot = df.pivot_table(index='Graph', columns='Method', values='Cost')
+    pivot = pivot.dropna() # Requires complete data (all methods solved the instance)
+
+    if len(pivot) < 5 or len(pivot.columns) < 2:
+        print("\n[INFO] Skipping Friedman Test (insufficient overlapping data).")
+        return
+
+    print(f"\n=== Friedman Test ({len(pivot)} instances) ===")
+
+    # Calculate Ranks (lower cost = rank 1)
+    ranks = pivot.rank(axis=1, ascending=True)
+    avg_ranks = ranks.mean().sort_values()
+
+    print("Average Ranks (Lower is better):")
+    print(avg_ranks)
+
+    # Save ranks
+    ranks.reset_index().to_csv(os.path.join(out_dir, "friedman_ranks.csv"), index=False)
+
+    # Simple Friedman calculation
+    from scipy.stats import friedmanchisquare
+    # args for friedman: array of measurements for each method
+    args = [pivot[col].values for col in pivot.columns]
+    try:
+        stat, p = friedmanchisquare(*args)
+        print(f"Friedman Chi^2 = {stat:.2f}, p-value = {p:.4e}")
+        if p < 0.05:
+            print(">> Significant difference detected among methods.")
+        else:
+            print(">> No significant difference detected.")
+
+        with open(os.path.join(out_dir, "statistical_tests_friedman.txt"), "w") as f:
+            f.write(f"Friedman Test Results\n")
+            f.write(f"Instances: {len(pivot)}\n")
+            f.write(f"Chi^2: {stat:.4f}\n")
+            f.write(f"p-value: {p:.4e}\n\n")
+            f.write("Average Ranks:\n")
+            f.write(avg_ranks.to_string())
+
+    except Exception as e:
+        print(f"Friedman Test Failed: {e}")
 
 def generate_latex_table(stats_df, out_path, caption="Experimental Results"):
     """Generates a professional Booktabs-style LaTeX table."""
@@ -181,6 +229,9 @@ def run_analysis(df, out_dir):
 
     # Save CSV summary
     summary.to_csv(os.path.join(out_dir, "summary_metrics.csv"), index=False, float_format="%.2f")
+
+    # Friedman Test
+    conduct_friedman_test(df, out_dir)
 
     # Generate LaTeX Table
     generate_latex_table(summary, os.path.join(out_dir, "table_1_results.tex"))
@@ -291,6 +342,44 @@ def create_plots(df, summary_df, out_dir):
         plt.savefig(os.path.join(out_dir, "fig_barplot_success.pdf"))
     except PermissionError:
         print(f"[WARN] Could not save 'fig_barplot_success.pdf' (Permission denied). Is it open?")
+    plt.close()
+
+    # 4. Performance Profile (Cumulative Distribution of Ratios)
+    if len(methods) > 1:
+        plt.figure(figsize=(6, 4))
+        # Calculate cost ratio per instance: r_p,s = Cost / min_Cost
+        pivot = df.pivot_table(index='Graph', columns='Method', values='Cost', aggfunc='min')
+        min_costs = pivot.min(axis=1)
+
+        for method in methods:
+            if method not in pivot.columns: continue
+            ratios = pivot[method] / min_costs
+            ratios = ratios.dropna().sort_values()
+
+            # CDF
+            y = np.arange(1, len(ratios) + 1) / len(ratios)
+            plt.step(ratios, y, where='post', label=method, color=palette.get(method, 'k'))
+
+        plt.title("Performance Profile (Cost)")
+        plt.xlabel(r"Performance Ratio ($\tau$)")
+        plt.ylabel(r"Probability ($P(r_{p,s} \le \tau$)")
+        plt.legend()
+        plt.grid(True, linestyle='--', alpha=0.5)
+        plt.xlim(1.0, 1.05 if ratios.max() < 1.05 else min(1.5, ratios.max())) # Zoom in on near-optimal
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, "fig_perf_profile.pdf"))
+        plt.close()
+
+    # 5. Box Plot of Runtimes (Log Scale)
+    plt.figure(figsize=(6, 4))
+    sns.boxplot(data=df, x='Method', y='Time', palette=palette, showfliers=False)
+    plt.yscale('log')
+    plt.title("Runtime Distribution (Log Scale)")
+    plt.ylabel("Time (s)")
+    plt.xlabel("")
+    plt.xticks(rotation=15)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "fig_boxplot_time.pdf"))
     plt.close()
 
     # 3. Runtime vs Quality Tradeoff (Scatter)
