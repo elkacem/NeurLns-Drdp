@@ -1115,15 +1115,27 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
 
     # Text output file
     with open(out_path, "w", encoding="utf-8") as f:
+        # Loop variables initialization for safety
+        solver = None
+        n = None
+        neigh = None
+
         for fp in files:
             base = os.path.basename(fp)
 
-            # Explicit cleanup
-            if TORCH_OK:
-                torch.cuda.empty_cache()
+            # --- AGGRESSIVE GPU REFRESH ---
+            # 1. Explicitly drop references to previous iteration's heavy objects
+            solver = None
+            n = None
+            neigh = None
+
+            # 2. Run Garbage Collection to destroy the Python objects holding tensors
             gc.collect()
 
-            solver = None
+            # 3. Release the cached CUDA memory (only works if tensors are actually destroyed by GC)
+            if TORCH_OK:
+                torch.cuda.empty_cache()
+
             try:
                 # Try handling with requested device (e.g. CUDA)
                 n, neigh = read_mtx_gz(fp)
