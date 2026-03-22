@@ -1149,54 +1149,28 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
                 secs = time.time() - t1
 
             except Exception as e:
-                # Catch OOM specifically
-                if "out of memory" in str(e).lower() and device and "cuda" in str(device).lower():
-                    print(f"[WARN] {base}: GPU OOM. Retrying on CPU...", file=sys.stderr)
+                # Log failure and skip
+                block = (
+                    f"Graph: {base}\n"
+                    f"Solution: []\n"
+                    f"Cost: -1\n"
+                    f"Time(s): 0.000000\n"
+                )
+                print(block, end="")
+                f.write(block + "\n")
+
+                if "out of memory" in str(e).lower():
+                    print(f"[WARN] {base}: GPU OOM. Skipping graph.", file=sys.stderr)
                     if TORCH_OK:
                         torch.cuda.empty_cache()
-                    if solver:
-                        del solver
-                        gc.collect()
-
-                    # Retry on CPU
-                    try:
-                        solver = NeuroCPLNS(n, neigh, device='cpu')
-                        t1 = time.time()
-                        S, c = solver.solve(
-                            iters=iters, starts=starts, cp_time=cp_time, topk=topk,
-                            workers=workers, radius=2, cap=1200, pr_every=120
-                        )
-                        secs = time.time() - t1
-                    except Exception as e2:
-                        # CPU failed too (or some other error)
-                        block = (
-                            f"Graph: {base}\n"
-                            f"Solution: []\n"
-                            f"Cost: -1\n"
-                            f"Time(s): 0.000000\n"
-                        )
-                        print(block, end="")
-                        f.write(block + "\n")
-                        print(f"[ERROR] {base} (CPU Retry Failed): {e2}", file=sys.stderr)
-                        if writer:
-                            writer.writerow([base, "NeuroCP-LNS", -1, 0.0, iters])
-                            csv_file.flush()
-                        continue
                 else:
-                    # Not an OOM or already on CPU
-                    block = (
-                        f"Graph: {base}\n"
-                        f"Solution: []\n"
-                        f"Cost: -1\n"
-                        f"Time(s): 0.000000\n"
-                    )
-                    print(block, end="")
-                    f.write(block + "\n")
                     print(f"[ERROR] {base}: {e}", file=sys.stderr)
-                    if writer:
-                        writer.writerow([base, "NeuroCP-LNS", -1, 0.0, iters])
-                        csv_file.flush()
-                    continue
+                    # traceback.print_exc()
+
+                if writer:
+                    writer.writerow([base, "NeuroCP-LNS", -1, 0.0, iters])
+                    csv_file.flush()
+                continue
 
             # If success (either first try or retry)
             try:
