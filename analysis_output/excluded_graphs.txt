@@ -1,5 +1,0 @@
-The following 4 graphs were excluded because NeuroCP-LNS did not produce a feasible solution:
-bcspwr07.mtx.gz
-blckhole.mtx.gz
-eris1176.mtx.gz
-sstmodel.mtx.gz
