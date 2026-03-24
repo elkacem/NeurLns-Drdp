@@ -1105,7 +1105,7 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
     try:
         csv_file = open(csv_path, 'w', newline='', encoding='utf-8')
         writer = csv.writer(csv_file)
-        writer.writerow(['Graph', 'Method', 'Cost', 'Time', 'Iterations'])
+        writer.writerow(['Graph', 'Method', 'Cost', 'Time', 'Solution'])
         print(f"[INFO] CSV logging enabled: {csv_path}")
     except Exception as e:
         print(f"[WARN] Could not open CSV file {csv_path}: {e}", file=sys.stderr)
@@ -1168,7 +1168,7 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
                     # traceback.print_exc()
 
                 if writer:
-                    writer.writerow([base, "NeuroCP-LNS", -1, 0.0, iters])
+                    writer.writerow([base, "NeuroCP-LNS", -1, 0.0, "[]"])
                     csv_file.flush()
                 continue
 
@@ -1196,9 +1196,18 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5,
 
             # CSV
             if writer:
-                writer.writerow([base, "NeuroCP-LNS", int(cost_out), f"{secs:.4f}", iters])
+                writer.writerow([base, "NeuroCP-LNS", int(cost_out), f"{secs:.4f}", sol_text])
                 csv_file.flush()
 
+            # --- CLEANUP AFTER GRAPH ---
+            del solver, n, neigh, S
+            solver = None
+            n = None
+            neigh = None
+            S = None
+            gc.collect()
+            if TORCH_OK:
+                torch.cuda.empty_cache()
 
     # keep overall timing off the main output format
     print(f"[INFO] Total time: {time.time() - t0:.2f}s", file=sys.stderr)

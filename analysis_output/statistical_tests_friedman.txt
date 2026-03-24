@@ -1,0 +1,10 @@
+Friedman Test Results
+Instances: 17
+Chi^2: 13.2400
+p-value: 1.3334e-03
+
+Average Ranks:
+Method
+Exact-CP             1.676471
+NeuroCP-LNS          1.705882
+Metaheuristic-ACO    2.617647

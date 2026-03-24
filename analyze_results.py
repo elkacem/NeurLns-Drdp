@@ -28,9 +28,11 @@ def parse_args():
 
     # Auto-detection defaults
     default_results = "results.txt.csv"
+    default_aco = "aco_results.csv"
 
     parser.add_argument("--results", type=str, help="Path to main solver results", default=default_results)
-    parser.add_argument("--classical", type=str, help="Path to classical results (for comparison)", default=None)
+    parser.add_argument("--classical", type=str, help="Path to classical results (ACO)", default=default_aco)
+    parser.add_argument("--exact", type=str, help="Path to exact solver results", default="exact_results.csv")
 
     parser.add_argument("--out_dir", type=str, default="analysis_output", help="Directory for paper artifacts")
     return parser.parse_args()
@@ -42,8 +44,15 @@ def load_and_clean_data(args):
         'NeuroCP-LNS': args.results,
     }
 
-    if args.classical:
-        file_map['Metaheuristic-Ref'] = args.classical
+    if args.classical and os.path.exists(args.classical):
+        file_map['Metaheuristic-ACO'] = args.classical
+    elif os.path.exists("aco_results.csv"):
+        file_map['Metaheuristic-ACO'] = "aco_results.csv"
+
+    if args.exact and os.path.exists(args.exact):
+        file_map['Exact-CP'] = args.exact
+    elif os.path.exists("exact_results.csv"):
+        file_map['Exact-CP'] = "exact_results.csv"
 
     dfs = []
     print(f"{'Method':<25} | {'Path':<40} | {'Status'}")
@@ -52,14 +61,31 @@ def load_and_clean_data(args):
     valid_methods = []
 
     for method, path in file_map.items():
-        # Exclusion logic removed as args.exclude is no longer supported
-        # if args.exclude and any(exc.lower() in method.lower() for exc in args.exclude):
-        #     print(f"{method:<25} | {'-- excluded --':<40} | SKIPPED (User request)")
-        #     continue
-
         if path and os.path.exists(path):
             try:
-                df = pd.read_csv(path)
+                # Header detection: Read first line
+                with open(path, 'r') as f:
+                    first_line = f.readline().strip()
+
+                has_header = "Graph" in first_line and "Cost" in first_line
+
+                if has_header:
+                    df = pd.read_csv(path)
+                else:
+                    # Assume: Graph, Method, Cost, Time, Iterations (standard for results.txt.csv)
+                    # But wait, results.txt.csv might have 4 or 5 columns.
+                    # check column count
+                    num_cols = len(first_line.split(','))
+                    if num_cols == 5:
+                        names = ['Graph', 'Method', 'Cost', 'Time', 'Iterations']
+                    elif num_cols == 4:
+                         names = ['Graph', 'Method', 'Cost', 'Time']
+                    else:
+                         # fallback
+                         names = None
+
+                    df = pd.read_csv(path, header=None, names=names)
+
                 df.columns = [c.strip() for c in df.columns] # Remove extra spaces
 
                 # Check required columns
@@ -230,74 +256,51 @@ def run_analysis(df, out_dir):
     # Save CSV summary
     summary.to_csv(os.path.join(out_dir, "summary_metrics.csv"), index=False, float_format="%.2f")
 
-    # Friedman Test
-    conduct_friedman_test(df, out_dir)
+    # Friedman Test / Wilcoxon
+    if len(df['Method'].unique()) > 2:
+        conduct_friedman_test(df, out_dir)
+    elif len(df['Method'].unique()) == 2:
+        # Wilcoxon
+        methods = df['Method'].unique()
+        pivot = df.pivot_table(index='Graph', columns='Method', values='Cost').dropna()
+        if len(pivot) > 0:
+            stat, p = wilcoxon(pivot[methods[0]], pivot[methods[1]])
+            print(f"\n=== Wilcoxon Signed-Rank Test ({methods[0]} vs {methods[1]}) ===")
+            print(f"Statistic: {stat}, p-value: {p}")
+            if p < 0.05:
+                print(">> Significant difference detected.")
+            else:
+                print(">> No significant difference detected.")
 
     # Generate LaTeX Table
     generate_latex_table(summary, os.path.join(out_dir, "table_1_results.tex"))
 
+    # --- Custom: Save Best Solution Per Graph ---
+    # We want to identify the winner and save the solution vector if available.
+    # Note: df currently might not have 'Solution' column if not all files had it.
+    # If 'Solution' is in df, we can use it.
+    if 'Solution' in df.columns:
+        best_rows = df.loc[df['Is_Best']].copy()
+        # Deduplicate if multiple methods found best, pick one (e.g. fastest)
+        best_rows.sort_values(by=['Graph', 'Time'], inplace=True)
+        best_unique = best_rows.drop_duplicates(subset=['Graph'])
+
+        best_sol_path = os.path.join(out_dir, "best_solutions.csv")
+        best_unique[['Graph', 'Method', 'Cost', 'Time', 'Solution']].to_csv(best_sol_path, index=False)
+        print(f"\n[INFO] Saved best solutions with vectors to {best_sol_path}")
+
+    # --- Custom: Where did ACO win? ---
+    pivot = df.pivot_table(index='Graph', columns='Method', values='Cost')
+    if 'Metaheuristic-ACO' in pivot.columns and 'NeuroCP-LNS' in pivot.columns:
+        # ACO wins if Cost < Neuro
+        aco_wins = pivot[pivot['Metaheuristic-ACO'] < pivot['NeuroCP-LNS']]
+        if not aco_wins.empty:
+            print(f"\n=== Instances where ACO outperforms NeuroCP-LNS ({len(aco_wins)}) ===")
+            print(aco_wins[['Metaheuristic-ACO', 'NeuroCP-LNS']].to_string())
+            aco_wins.to_csv(os.path.join(out_dir, "aco_wins.csv"))
+
     print("\n=== Aggregated Results ===")
     print(summary[['Method', 'Mean Cost', 'Mean Time', 'Mean Gap %', 'Success Rate %']].to_string(index=False))
-
-    # --- A.2 Head-to-Head Win/Tie/Loss (vs Ours) ---
-    baseline = 'NeuroCP-LNS (Ours)'
-    if baseline in df['Method'].unique():
-        pivot_cost = df.pivot_table(index='Graph', columns='Method', values='Cost')
-        if len(pivot_cost.columns) > 1:
-            print(f"\n=== Head-to-Head vs {baseline} ===")
-            h2h_data = []
-            for method in pivot_cost.columns:
-                if method == baseline: continue
-
-                # Compare method vs baseline (lower cost is better)
-                # Diff = Method - Baseline
-                # Diff > 0 => Baseline wins (Method is worse)
-                # Diff < 0 => Method wins (Baseline is worse)
-                diffs = pivot_cost[method] - pivot_cost[baseline]
-
-                wins = (diffs < 0).sum() # Method beats Baseline
-                losses = (diffs > 0).sum() # Baseline beats Method
-                ties = (diffs == 0).sum()
-
-                print(f"{baseline} vs {method:<20} | Wins: {losses} | Ties: {ties} | Losses: {wins}")
-                h2h_data.append({
-                    'Opponent': method,
-                    'Ours_Wins': losses,
-                    'Ties': ties,
-                    'Ours_Losses': wins
-                })
-
-            if h2h_data:
-                pd.DataFrame(h2h_data).to_csv(os.path.join(out_dir, "head_to_head.csv"), index=False)
-        else:
-            print(f"\n[INFO] Skipping Head-to-Head (Only 1 method present)")
-
-    # --- B. Statistical Tests (Wilcoxon) ---
-    pivot_gap = df.pivot_table(index='Graph', columns='Method', values='Gap')
-    baseline = 'NeuroCP-LNS (Ours)'
-
-    stats_log = []
-    if baseline in pivot_gap.columns and len(pivot_gap.columns) > 1:
-        print(f"\n=== Statistical Significance (vs {baseline}) ===")
-        for method in pivot_gap.columns:
-            if method == baseline: continue
-
-            # Pairwise removal of NaNs
-            valid_data = pivot_gap[[baseline, method]].dropna()
-            x, y = valid_data[baseline], valid_data[method]
-
-            if len(x) > 1 and not np.allclose(x, y):
-                try:
-                    stat, p = wilcoxon(x, y)
-                    verdict = "**Signif**" if p < 0.05 else "Not Signif"
-                    print(f"{method:<20} | p={p:.2e} | {verdict}")
-                    stats_log.append({'Comparison': method, 'p-value': p, 'Significant': p < 0.05})
-                except Exception as e:
-                    print(f"{method:<20} | Error: {e}")
-            else:
-                print(f"{method:<20} | N/A (Insufficient data or identical)")
-
-    pd.DataFrame(stats_log).to_csv(os.path.join(out_dir, "statistical_tests.csv"), index=False)
 
     return summary
 
@@ -310,10 +313,19 @@ def create_plots(df, summary_df, out_dir):
     colors = sns.color_palette("colorblind", n_colors=len(methods))
 
     for i, m in enumerate(methods):
-        if "NeuroCP-LNS (Ours)" in m:
+        if "NeuroCP-LNS" in m:
             palette[m] = "#d62728" # Highlight Red/Brick
         else:
             palette[m] = colors[i] # Default
+
+    def safe_save(fname):
+        try:
+            plt.savefig(fname)
+            print(f"Saved {fname}")
+        except PermissionError:
+            print(f"[WARN] Could not save {fname} (Permission denied). Close the file.")
+        except Exception as e:
+            print(f"[WARN] Could not save {fname}: {e}")
 
     # 1. Box Plot of Optimality Gaps
     plt.figure(figsize=(6, 4))
@@ -325,7 +337,7 @@ def create_plots(df, summary_df, out_dir):
     plt.grid(axis='y', linestyle='--', alpha=0.5)
     plt.xticks(rotation=15)
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "fig_boxplot_gap.pdf"))
+    safe_save(os.path.join(out_dir, "fig_boxplot_gap.pdf"))
     plt.close()
 
     # 2. Success Rate Bar Chart
@@ -338,10 +350,7 @@ def create_plots(df, summary_df, out_dir):
     plt.grid(axis='y', linestyle='--', alpha=0.5)
     plt.xticks(rotation=15)
     plt.tight_layout()
-    try:
-        plt.savefig(os.path.join(out_dir, "fig_barplot_success.pdf"))
-    except PermissionError:
-        print(f"[WARN] Could not save 'fig_barplot_success.pdf' (Permission denied). Is it open?")
+    safe_save(os.path.join(out_dir, "fig_barplot_success.pdf"))
     plt.close()
 
     # 4. Performance Profile (Cumulative Distribution of Ratios)
@@ -362,12 +371,13 @@ def create_plots(df, summary_df, out_dir):
 
         plt.title("Performance Profile (Cost)")
         plt.xlabel(r"Performance Ratio ($\tau$)")
-        plt.ylabel(r"Probability ($P(r_{p,s} \le \tau$)")
+        # Fix: use \leq or <=. pure matplotlib mathtext prefers \leq
+        plt.ylabel(r"Probability ($P(r_{p,s} \leq \tau$)")
         plt.legend()
         plt.grid(True, linestyle='--', alpha=0.5)
         plt.xlim(1.0, 1.05 if ratios.max() < 1.05 else min(1.5, ratios.max())) # Zoom in on near-optimal
         plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, "fig_perf_profile.pdf"))
+        safe_save(os.path.join(out_dir, "fig_perf_profile_v2.pdf"))
         plt.close()
 
     # 5. Box Plot of Runtimes (Log Scale)
@@ -379,7 +389,7 @@ def create_plots(df, summary_df, out_dir):
     plt.xlabel("")
     plt.xticks(rotation=15)
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "fig_boxplot_time.pdf"))
+    safe_save(os.path.join(out_dir, "fig_boxplot_time_v2.pdf"))
     plt.close()
 
     # 3. Runtime vs Quality Tradeoff (Scatter)
@@ -397,10 +407,7 @@ def create_plots(df, summary_df, out_dir):
     plt.ylabel("Average Optimality Gap (%)")
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.tight_layout()
-    try:
-        plt.savefig(os.path.join(out_dir, "fig_scatter_tradeoff.pdf"))
-    except PermissionError:
-        print(f"[WARN] Could not save 'fig_scatter_tradeoff.pdf' (Permission denied). Is it open?")
+    safe_save(os.path.join(out_dir, "fig_scatter_tradeoff_v2.pdf"))
     plt.close()
 
     print("\n[INFO] Plots saved to", out_dir)
@@ -417,7 +424,7 @@ def main():
         df, methods = load_and_clean_data(args)
 
         # --- FILTERING: Only consider graphs solved by our approach ---
-        our_method = 'NeuroCP-LNS (Ours)'
+        our_method = 'NeuroCP-LNS'
         if our_method in df['Method'].unique():
             # Identify graphs where our method has a valid feasible solution
             valid_runs = df[(df['Method'] == our_method) & (df['Feasible'] == True)]
@@ -429,10 +436,16 @@ def main():
             if unsolved_graphs:
                 print(f"\n[FILTERING] Excluding {len(unsolved_graphs)} graphs not solved by {our_method} (Resource/Time limits):")
 
+                # Check if we are accidentally excluding graphs solely because ACO solved them but NeuroCP-LNS failed
+                # This is important for fair comparison. If NeuroCP-LNS failed, it's a loss.
+                # However, for metric aggregation (mean cost), we can only compare on common subset.
+                # Or we assign penalty (infinity) to failures.
+                # The user asked to "consider on the analysis only the graphs that are solved in our approach".
+
                 with open(os.path.join(args.out_dir, "excluded_graphs.txt"), "w") as f:
-                    f.write(f"The following {len(unsolved_graphs)} graphs were excluded because {our_method} did not produce a feasible solution (likely due to OOM or timeout):\n")
+                    f.write(f"The following {len(unsolved_graphs)} graphs were excluded because {our_method} did not produce a feasible solution:\n")
                     for g in sorted(unsolved_graphs):
-                        print(f"  - {g}")
+                        # print(f"  - {g}") # verbose
                         f.write(f"{g}\n")
 
                 print(f"[INFO] List of excluded graphs saved to '{os.path.join(args.out_dir, 'excluded_graphs.txt')}'")
