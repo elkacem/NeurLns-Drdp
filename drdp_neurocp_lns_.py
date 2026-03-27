@@ -1269,13 +1269,15 @@
 #     main()
 
 """
-DRDP-NeuroCP-LNS: A Hybrid Neural-Symbolic Solver for Double Roman Domination
+DRDP-NeuroCP-ALNS: Adaptive Neural Large Neighborhood Search for DRDP
 AAAI Reference Implementation
 
-This module implements the DRDP-NeuroCP-LNS architecture as described in the paper:
+This module implements the DRDP-NeuroCP-ALNS architecture:
 - Always-feasible O(deg) local state engine (labels in {0,2,3})
 - GraphSAGE-lite (FP16) to score "unlock" sets; Gumbel-Top-k for diversity
-- Local DRDP-1' ILP (scaled to integers) solved by OR-Tools CP-SAT with boundary protection
+- [NEW] Adaptive Operator Selection (GNN k-hop vs. Deep Random Walk)
+- [NEW] Curriculum Region Sizing (Dynamic LNS bounds)
+- Local DRDP-1' ILP solved by OR-Tools CP-SAT with boundary protection
 - Advantage-Weighted Regression (AWR) online learning of unlock scores
 - Elite pool and short path-relinking for intensification
 """
@@ -1929,6 +1931,9 @@ class NeuroCPLNS:
 
             if self.core.viol_count == 0: pool.try_add(self.core.S)
 
+            # [AAAI UPGRADE 1] Curriculum Region Sizing (Start small, expand dynamically)
+            current_cap = min(50, cap)
+
             for it in range(1, iters + 1):
                 c0, out = self.core.cost(), self._forward(stagn, detach=True)
                 scores = out[2].cpu().numpy() if self.use_torch else out[2]
@@ -1941,14 +1946,30 @@ class NeuroCPLNS:
 
                 X_taken, g_taken = self.core.node_features(), self.core.global_features(stagn)
 
+                # [AAAI UPGRADE 2] Adaptive Operator Selection (ALNS style)
+                anchors = unlocked[:min(3, len(unlocked))]
                 Rset = set()
-                if (anchors := unlocked[:min(3, len(unlocked))]):
+
+                # 75% of the time: Exploit using GNN-guided k-hop balls
+                if random.random() < 0.75 and anchors:
+                    per_cap = max(1, current_cap // len(anchors))
                     for a in anchors:
-                        for node in k_hop_ball(self.neigh, a, radius, max(1, cap // len(anchors))):
+                        for node in k_hop_ball(self.neigh, a, radius, per_cap):
                             Rset.add(node)
-                            if len(Rset) >= cap: break
-                        if len(Rset) >= cap: break
-                R = list(Rset) if Rset else unlocked[:cap]
+                            if len(Rset) >= current_cap: break
+                        if len(Rset) >= current_cap: break
+
+                # 25% of the time: Explore using Deep Random Walk to shatter local minima
+                else:
+                    curr_node = random.choice(unlocked) if unlocked else random.randint(0, self.n - 1)
+                    for _ in range(current_cap):
+                        Rset.add(curr_node)
+                        neighbors = self.neigh[curr_node]
+                        curr_node = random.choice(neighbors) if neighbors else random.randint(0, self.n - 1)
+
+                if not Rset:
+                    Rset = set(unlocked[:current_cap])
+                R = list(Rset)
 
                 snap = self.core.copy_snapshot()
                 S_loc, loc_cost, Rlist = solve_local_cpsat_region(self.core, R, time_limit=cp_time, workers=workers)
@@ -1963,11 +1984,17 @@ class NeuroCPLNS:
                 reward = float(c0 - self.core.cost())
                 self.replay.add(Event(unlocked, reward, stagn, X_taken, g_taken))
 
+                # [AAAI UPGRADE 1 Cont.] Adjust curriculum bounds based on success/stagnation
                 if reward > 0 and self.core.viol_count == 0:
-                    stagn = 0;
+                    stagn = 0
                     pool.try_add(self.core.S)
+                    # Success: Shrink the region to move extremely fast through easy improvements
+                    current_cap = max(50, int(current_cap * 0.8))
                 else:
                     stagn += 1
+                    # Stagnation: Expand the CP-SAT bound to look further for complex moves
+                    if stagn > 2:
+                        current_cap = min(cap, int(current_cap * 1.5))
 
                 if pr_every > 0 and (it % pr_every) == 0 and pool.pool:
                     if (tgt := pool.farthest(self.core.S) or pool.best()) is not None:
@@ -1982,7 +2009,7 @@ class NeuroCPLNS:
                     bestC, bestS = self.core.cost(), self.core.S.copy()
 
                 if it % 16 == 0: self._learn(batch=256)
-                if stagn >= 4: break
+                if stagn >= 8 and current_cap >= cap: break  # Early stopping if totally stuck
 
         return bestS, bestC
 
@@ -2016,17 +2043,17 @@ def solve_dir(data_dir: str, out_path: str, iters: int = 500, starts: int = 5, c
                 print(block, end="")
                 f.write(block + "\n")
                 if writer:
-                    writer.writerow([base, "NeuroCP-LNS", int(c), f"{secs:.4f}", sol_text])
+                    writer.writerow([base, "NeuroCP-ALNS", int(c), f"{secs:.4f}", sol_text])
                     csv_file.flush()
             except Exception as e:
                 print(f"[ERROR] {base}: {e}", file=sys.stderr)
-                if writer: writer.writerow([base, "NeuroCP-LNS", -1, 0.0, "[]"])
+                if writer: writer.writerow([base, "NeuroCP-ALNS", -1, 0.0, "[]"])
 
     if csv_file: csv_file.close()
 
 
 def main():
-    ap = argparse.ArgumentParser(description="DRDP-NeuroCP-LNS Solver (AAAI 2024)")
+    ap = argparse.ArgumentParser(description="DRDP-NeuroCP-ALNS Solver (AAAI 2024/2025)")
     sub = ap.add_subparsers(dest="cmd")
     ap_s = sub.add_parser("solve")
     ap_s.add_argument("--data_dir", required=True)
