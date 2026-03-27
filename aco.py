@@ -244,7 +244,8 @@ class ACO:
         cf = 2 * (sum_differences / len(self.pheromone)) * ((tau_max - tau_min) - 1)
         return cf
 
-    def run_aco(self, termination_condition):
+    def run_aco(self, termination_condition, start_time=None, time_limit=None):
+        import time
         self.initialize_pheromone()
         best_solution = []
         best_solution_fitness = float('inf')
@@ -252,7 +253,12 @@ class ACO:
         curr_best_solution_fitness = float('inf')
 
         while termination_condition:
+            if start_time is not None and time_limit is not None and (time.perf_counter() - start_time > time_limit):
+                break
+
             for _ in range(self.num_iterations):
+                if start_time is not None and time_limit is not None and (time.perf_counter() - start_time > time_limit):
+                    break
                 solution = self.construct_solution()
                 solution = self.extend_solution(solution)
                 solution = self.reduce_solution(solution)
@@ -311,7 +317,7 @@ def solve_file(filepath, args):
         )
 
         t0 = time.perf_counter()
-        best_cost, best_sol = aco.run_aco(args.termination_condition)
+        best_cost, best_sol = aco.run_aco(args.termination_condition, start_time=t0, time_limit=args.time_limit)
         elapsed = time.perf_counter() - t0
 
         # Map solution back to original node ids if needed?
@@ -365,6 +371,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_iterations", type=int, default=10, help="Inner ACO iterations")
     parser.add_argument("--evaporation_rate", type=float, default=0.1, help="Pheromone evaporation")
     parser.add_argument("--initial_pheromone", type=float, default=1.0, help="Initial pheromone")
+    parser.add_argument("--time_limit", type=float, default=300.0, help="Time limit in seconds per graph")
 
     parser.add_argument("--limit", type=int, default=None, help="Limit number of graphs to solve")
 
