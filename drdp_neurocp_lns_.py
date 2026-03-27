@@ -1275,8 +1275,8 @@ AAAI Reference Implementation
 This module implements the DRDP-NeuroCP-ALNS architecture:
 - Always-feasible O(deg) local state engine (labels in {0,2,3})
 - GraphSAGE-lite (FP16) to score "unlock" sets; Gumbel-Top-k for diversity
-- [NEW] Adaptive Operator Selection (GNN k-hop vs. Deep Random Walk)
-- [NEW] Curriculum Region Sizing (Dynamic LNS bounds)
+- Adaptive Operator Selection (GNN k-hop vs. Deep Random Walk)
+- Curriculum Region Sizing (Dynamic LNS bounds)
 - Local DRDP-1' ILP solved by OR-Tools CP-SAT with boundary protection
 - Advantage-Weighted Regression (AWR) online learning of unlock scores
 - Elite pool and short path-relinking for intensification
@@ -1600,7 +1600,6 @@ if TORCH_OK:
             self.W = nn.Linear(in_dim, out_dim, bias=False)
 
         def forward(self, H, A):
-            # Sparse-dense matmul in FP32 for stability
             with torch.autocast(device_type=H.device.type, enabled=False):
                 agg = torch.sparse.mm(A.float(), H.float()).to(H.dtype)
             return self.W(agg)
@@ -1636,7 +1635,7 @@ if TORCH_OK:
             return s, v
 
 
-# Numpy fallback classes omitted for brevity (they match Torch behavior minimally)
+# Numpy fallback classes omitted for brevity
 class SAGE_Numpy:
     def __init__(self, in_dim=10, hid=128, layers=3): pass
 
@@ -1652,7 +1651,6 @@ class Heads_Numpy:
 # =================== Search Utilities ===================
 
 def gumbel_top_k(scores: np.ndarray, K: int) -> List[int]:
-    """Draws a diverse anchor set heavily biased toward high neural scores."""
     if K <= 0 or len(scores) == 0: return []
     K = min(K, len(scores))
     g = -np.log(-np.log(np.random.rand(*scores.shape) + 1e-9) + 1e-9)
@@ -1668,8 +1666,6 @@ class PoolEntry:
 
 
 class ElitePool:
-    """Maintains a set of diverse, high-quality feasible solutions."""
-
     def __init__(self, size=8, min_hamming_frac=0.05):
         self.size = size
         self.minham = min_hamming_frac
@@ -1692,7 +1688,6 @@ class ElitePool:
 
 
 def path_relink(core: DRDPCore, tgt: np.ndarray, max_steps: int = 15, scores: Optional[np.ndarray] = None):
-    """Short path-relinking guided by neural confidence."""
     diffs = np.where(core.S != tgt)[0].tolist()
     if scores is not None:
         diffs.sort(key=lambda u: scores[u] if tgt[u] == 0 else -scores[u], reverse=True)
@@ -1719,7 +1714,6 @@ def path_relink(core: DRDPCore, tgt: np.ndarray, max_steps: int = 15, scores: Op
 # =================== CP-SAT Subproblem (LNS) ===================
 
 def k_hop_ball(neigh: List[List[int]], center: int, k: int, cap: int) -> List[int]:
-    """Expands topological k-hop ball for regional subproblem."""
     seen, q, order = {center}, [(center, 0)], [center]
     while q and len(order) < cap:
         u, d = q.pop(0)
@@ -1734,10 +1728,6 @@ def k_hop_ball(neigh: List[List[int]], center: int, k: int, cap: int) -> List[in
 
 
 def build_local_cpsat(core: DRDPCore, R: List[int], hint: Optional[np.ndarray] = None):
-    """
-    Constructs the exact DRDP-1' subproblem over region R (Eq. 3).
-    Applies boundary constants and frontier protection.
-    """
     assert ORTOOLS_OK, "OR-Tools required."
     model = cp_model.CpModel()
     idx_of = {v: i for i, v in enumerate(R)}
@@ -1750,10 +1740,8 @@ def build_local_cpsat(core: DRDPCore, R: List[int], hint: Optional[np.ndarray] =
     def add_ge(terms, rhs: int):
         if rhs > 0: model.Add(lin_add(terms) >= int(rhs))
 
-    # At most one label (2 or 3) per vertex
     for i in range(len(R)): model.Add(y[i] + z[i] <= 1)
 
-    # Core constraint for v in R (Eq. 3)
     for i, v in enumerate(R):
         rhs, terms = 2, [y[i] * 2, z[i] * 2]
         for u in core.neigh[v]:
@@ -1763,7 +1751,6 @@ def build_local_cpsat(core: DRDPCore, R: List[int], hint: Optional[np.ndarray] =
                 rhs -= 1 if core.S[u] == 2 else (2 if core.S[u] == 3 else 0)
         add_ge(terms, rhs)
 
-    # Frontier Protection
     Rset = set(R)
     frontier = {w for v in R for w in core.neigh[v] if w not in Rset}
     for w in frontier:
@@ -1776,7 +1763,6 @@ def build_local_cpsat(core: DRDPCore, R: List[int], hint: Optional[np.ndarray] =
                 rhs -= 1 if core.S[t] == 2 else (2 if core.S[t] == 3 else 0)
         add_ge(terms, rhs)
 
-    # Objective
     model.Minimize(lin_add([yi * 2 for yi in y] + [zi * 3 for zi in z]))
 
     if hint is not None:
@@ -1798,8 +1784,7 @@ def solve_local_cpsat_region(core: DRDPCore, R: List[int], time_limit: float = 0
     solver.parameters.num_search_workers = max(1, int(workers))
     res = solver.Solve(model)
 
-    if res not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        return None, None, R
+    if res not in (cp_model.OPTIMAL, cp_model.FEASIBLE): return None, None, R
 
     S_loc = np.zeros(len(R), dtype=np.int8)
     for i in range(len(R)):
@@ -1811,16 +1796,15 @@ def solve_local_cpsat_region(core: DRDPCore, R: List[int], time_limit: float = 0
 
 @dataclass
 class Event:
-    unlocked: List[int]
-    reward: float
-    stagn: int
-    X: np.ndarray
+    unlocked: List[int];
+    reward: float;
+    stagn: int;
+    X: np.ndarray;
     g: np.ndarray
 
 
 class Replay:
-    def __init__(self, cap=50000):
-        self.buf: Deque[Event] = deque(maxlen=cap)
+    def __init__(self, cap=50000): self.buf: Deque[Event] = deque(maxlen=cap)
 
     def add(self, e: Event): self.buf.append(e)
 
@@ -1858,8 +1842,7 @@ class NeuroCPLNS:
 
     def _forward(self, stagn: int, detach: bool = False):
         Xn, gn = self.core.node_features(), self.core.global_features(stagn)
-        if not self.use_torch:
-            return None, None, self.heads.forward(self.enc.forward(Xn, None), gn)[0], 0.0
+        if not self.use_torch: return None, None, self.heads.forward(self.enc.forward(Xn, None), gn)[0], 0.0
 
         X = torch.tensor(Xn, dtype=torch.float32, device=self.device)
         g = torch.tensor(gn, dtype=torch.float32, device=self.device)
@@ -1931,7 +1914,6 @@ class NeuroCPLNS:
 
             if self.core.viol_count == 0: pool.try_add(self.core.S)
 
-            # [AAAI UPGRADE 1] Curriculum Region Sizing (Start small, expand dynamically)
             current_cap = min(50, cap)
 
             for it in range(1, iters + 1):
@@ -1946,11 +1928,10 @@ class NeuroCPLNS:
 
                 X_taken, g_taken = self.core.node_features(), self.core.global_features(stagn)
 
-                # [AAAI UPGRADE 2] Adaptive Operator Selection (ALNS style)
                 anchors = unlocked[:min(3, len(unlocked))]
                 Rset = set()
 
-                # 75% of the time: Exploit using GNN-guided k-hop balls
+                # Exploit vs Explore Operator Selection
                 if random.random() < 0.75 and anchors:
                     per_cap = max(1, current_cap // len(anchors))
                     for a in anchors:
@@ -1958,8 +1939,6 @@ class NeuroCPLNS:
                             Rset.add(node)
                             if len(Rset) >= current_cap: break
                         if len(Rset) >= current_cap: break
-
-                # 25% of the time: Explore using Deep Random Walk to shatter local minima
                 else:
                     curr_node = random.choice(unlocked) if unlocked else random.randint(0, self.n - 1)
                     for _ in range(current_cap):
@@ -1967,8 +1946,7 @@ class NeuroCPLNS:
                         neighbors = self.neigh[curr_node]
                         curr_node = random.choice(neighbors) if neighbors else random.randint(0, self.n - 1)
 
-                if not Rset:
-                    Rset = set(unlocked[:current_cap])
+                if not Rset: Rset = set(unlocked[:current_cap])
                 R = list(Rset)
 
                 snap = self.core.copy_snapshot()
@@ -1984,20 +1962,18 @@ class NeuroCPLNS:
                 reward = float(c0 - self.core.cost())
                 self.replay.add(Event(unlocked, reward, stagn, X_taken, g_taken))
 
-                # [AAAI UPGRADE 1 Cont.] Adjust curriculum bounds based on success/stagnation
+                # Curriculum Growth / Early Stopping
                 if reward > 0 and self.core.viol_count == 0:
                     stagn = 0
                     pool.try_add(self.core.S)
-                    # Success: Shrink the region to move extremely fast through easy improvements
-                    current_cap = max(50, int(current_cap * 0.8))
+                    current_cap = max(50, int(current_cap * 0.8))  # Shrink if successful
                 else:
                     stagn += 1
-                    # Stagnation: Expand the CP-SAT bound to look further for complex moves
-                    if stagn > 2:
-                        current_cap = min(cap, int(current_cap * 1.5))
+                    if stagn > 1: current_cap = min(cap, int(current_cap * 2.0))  # Rapid expand on stuck
 
                 if pr_every > 0 and (it % pr_every) == 0 and pool.pool:
-                    if (tgt := pool.farthest(self.core.S) or pool.best()) is not None:
+                    tgt = pool.farthest(self.core.S)  # BUG FIX APPLIED HERE
+                    if tgt is not None:
                         snap2 = self.core.copy_snapshot()
                         if path_relink(self.core, tgt, max_steps=15, scores=scores)[0] and self.core.viol_count == 0:
                             pool.try_add(self.core.S);
@@ -2009,7 +1985,9 @@ class NeuroCPLNS:
                     bestC, bestS = self.core.cost(), self.core.S.copy()
 
                 if it % 16 == 0: self._learn(batch=256)
-                if stagn >= 8 and current_cap >= cap: break  # Early stopping if totally stuck
+
+                # Fast early stopping restored
+                if stagn >= 5: break
 
         return bestS, bestC
 
