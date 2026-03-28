@@ -27,7 +27,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Analyze DRDP Solver Results for Research Paper")
 
     # Auto-detection defaults
-    default_results = "results.txt.csv"
+    default_results = "NeuroCP-ALNS.csv"
     default_aco = "aco_results.csv"
 
     parser.add_argument("--results", type=str, help="Path to main solver results", default=default_results)

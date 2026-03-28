@@ -1,0 +1,4 @@
+Method,Mean Cost,Median_Cost,Std Cost,Mean Time,Mean Gap %,Success Rate %,Feasible_Count,Total_Instances
+Exact-CP,254.12,112.00,322.71,280.53,126.85,28.57,112,112
+Metaheuristic-ACO,223.73,91.50,286.84,37.95,5.49,36.61,112,112
+NeuroCP-LNS,209.27,91.00,269.76,18.37,0.66,95.54,112,112
