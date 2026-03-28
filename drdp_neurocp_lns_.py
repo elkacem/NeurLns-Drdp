@@ -1901,7 +1901,7 @@ class NeuroCPLNS:
         self.scaler.update()
 
     def solve(self, iters: int = 500, starts: int = 5, cp_time: float = 0.30, topk: int = 256, radius: int = 2,
-              cap: int = 1200, pr_every: int = 120, workers: int = 8):
+              cap: int = 200, pr_every: int = 120, workers: int = 8):
         bestS, bestC = None, 10 ** 9
         for st in range(starts):
             self.core.S[:] = 0;
